@@ -15,9 +15,6 @@ User = get_user_model()
 
 
 def _issue_tokens_for(user):
-    """
-    Genera par de tokens (access/refresh) para el usuario dado.
-    """
     refresh = RefreshToken.for_user(user)
     return {"access": str(refresh.access_token), "refresh": str(refresh)}
 
@@ -26,10 +23,9 @@ class RequestOtpView(APIView):
     """
     POST /api/auth/request-otp/
     body: { "email": "<correo>" }
-
-    Crea un OTP aleatorio con TTL y lo envía por email (vía otp_service).
-    En DEV (si SHOW_DEV_HINTS=1 y DEBUG=1) puede incluir pistas.
     """
+    # 👇 además de AllowAny, desactivamos autenticación para evitar 401 si llega un Bearer inválido
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
     parser_classes = [JSONParser, FormParser]
     throttle_classes = [ScopedRateThrottle]
@@ -40,17 +36,14 @@ class RequestOtpView(APIView):
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"].lower().strip()
 
-        # Crea y envía OTP (Redis + TTL o fallback DB, según tu otp_service)
         otp_service.create_and_send(email)
 
         payload = {"detail": "Código enviado"}
-        # Solo muestras pistas si SHOW_DEV_HINTS=True y DEBUG=True (definido en settings)
         if getattr(settings, "SHOW_DEV_HINTS", False):
             payload.update({
                 "dev_hint_valid": getattr(settings, "OTP_DEV_FIXED", None),
                 "dev_hint_bypass": getattr(settings, "OTP_BYPASS", None),
             })
-
         return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -58,10 +51,9 @@ class VerifyOtpView(APIView):
     """
     POST /api/auth/verify-otp/
     body: { "email": "<correo>", "code": "<código>" }
-
-    Verifica el OTP. Si es válido, emite JWTs.
-    El BYPASS solo funciona si OTP_BYPASS_ENABLED=1 (en settings/env).
     """
+    # 👇 igual que arriba: sin autenticación
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
     parser_classes = [JSONParser, FormParser]
     throttle_classes = [ScopedRateThrottle]
@@ -74,7 +66,6 @@ class VerifyOtpView(APIView):
         email = serializer.validated_data["email"].lower().strip()
         code = serializer.validated_data["code"].strip()
 
-        # BYPASS: desactivado por defecto en Opción A (solo si OTP_BYPASS_ENABLED=1)
         if getattr(settings, "OTP_BYPASS_ENABLED", False) and code == getattr(settings, "OTP_BYPASS", ""):
             user, _ = User.objects.get_or_create(username=email, defaults={"email": email})
             return Response(
@@ -86,7 +77,6 @@ class VerifyOtpView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # Verificación real (Redis/DB) vía otp_service
         if not otp_service.verify(email, code):
             return Response({"detail": "Código inválido o expirado."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -100,6 +90,7 @@ class VerifyOtpView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
 class MeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -108,5 +99,4 @@ class MeView(APIView):
         return Response({
             "email": u.email or u.username,
             "username": u.username,
-            # aquí puedes sumar campos de perfil cuando los tengas
         }, status=status.HTTP_200_OK)
