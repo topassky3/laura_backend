@@ -27,3 +27,46 @@ class Category(models.Model):
 
     def __str__(self):
         return f"{self.user_id} · {self.pocket_type} · {self.name}"
+
+
+# ========= Transacciones =========
+class MoneyTx(models.Model):
+    TYPE_CHOICES = (("ingreso", "Ingreso"), ("gasto", "Gasto"))
+    PAYMENT_CHOICES = (("debito", "Débito"), ("credito", "Crédito"))
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="money_txs")
+
+    # NUEVO: bolsillo real de la transacción (clasificación correcta)
+    pocket_type = models.CharField(max_length=10, choices=POCKET_TYPES, default="gasto")
+
+    # Mantén 'type' como dirección visual (flechas/colores en UI). No clasifica bolsillo.
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+
+    # Relación opcional con Category para consistencia; y nombre plano para compatibilidad
+    category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True, related_name="txs")
+    category_name = models.CharField(max_length=48)
+
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="COP")
+    date = models.DateTimeField()
+    payment = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default="debito")
+    is_fixed = models.BooleanField(default=False)
+    note = models.CharField(max_length=240, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+        indexes = [
+            models.Index(fields=["user", "pocket_type", "category_name"]),
+            models.Index(fields=["user", "date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} · {self.pocket_type}/{self.type} · {self.category_name} · {self.amount} {self.currency}"
+
+    @property
+    def pocket_sign(self) -> int:
+        # Para flujo de caja neto: ingreso = +, gasto/ahorro/inversión = -
+        return 1 if self.pocket_type == "ingreso" else -1

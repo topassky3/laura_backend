@@ -1,9 +1,10 @@
 from rest_framework import viewsets, permissions
-from rest_framework.response import Response
-from rest_framework.decorators import action
 from django.db import transaction
-from .models import Category
-from .serializers import CategorySerializer
+from django.utils import timezone
+from datetime import datetime
+
+from .models import Category, MoneyTx
+from .serializers import CategorySerializer, MoneyTxSerializer
 
 DEFAULTS = {
     "ingreso":   [("Salario", "wallet", "#22C55E"), ("Freelance", "wallet", "#22C55E"), ("Ventas", "wallet", "#22C55E")],
@@ -13,9 +14,6 @@ DEFAULTS = {
 }
 
 def ensure_defaults(user, pocket_type=None):
-    """
-    Si el usuario no tiene categorías (o no tiene para un pocket_type), crear defaults.
-    """
     created = []
     with transaction.atomic():
         if pocket_type:
@@ -37,10 +35,8 @@ def ensure_defaults(user, pocket_type=None):
                         ))
     return created
 
+
 class CategoryViewSet(viewsets.ModelViewSet):
-    """
-    /api/fin/categories/?pocket_type=gasto
-    """
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -54,26 +50,49 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         ptype = request.query_params.get("pocket_type")
-        # Auto-seed si no hay categorías para el user
         ensure_defaults(request.user, pocket_type=ptype)
         return super().list(request, *args, **kwargs)
 
-    def perform_create(self, serializer):
-        # forzar orden al final
-        user = self.request.user
-        ptype = serializer.validated_data["pocket_type"]
-        last = Category.objects.filter(user=user, pocket_type=ptype).order_by("-order").first()
-        next_order = (last.order + 1) if last else 0
-        serializer.save(order=next_order)
 
-    @action(detail=False, methods=["post"])
-    def reorder(self, request):
-        """
-        Body: [{"id": 12, "order": 0}, ...]
-        """
-        user = request.user
-        items = request.data if isinstance(request.data, list) else []
-        with transaction.atomic():
-            for it in items:
-                Category.objects.filter(id=it.get("id"), user=user).update(order=it.get("order", 0))
-        return Response({"detail": "ok"})
+class MoneyTxViewSet(viewsets.ModelViewSet):
+    serializer_class = MoneyTxSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = MoneyTx.objects.filter(user=user)
+
+        # Filtros opcionales: month=YYYY-MM o start/end ISO
+        month = self.request.query_params.get("month")
+        start = self.request.query_params.get("start")
+        end = self.request.query_params.get("end")
+
+        # NUEVO: filtrar por bolsillo real
+        pocket = self.request.query_params.get("pocket_type") or self.request.query_params.get("pocket")
+
+        tz = timezone.get_current_timezone()
+
+        if month:
+            try:
+                year, mon = [int(x) for x in month.split("-")]
+                start_dt = timezone.make_aware(datetime(year, mon, 1, 0, 0, 0), tz)
+                if mon == 12:
+                    end_dt = timezone.make_aware(datetime(year + 1, 1, 1, 0, 0, 0), tz)
+                else:
+                    end_dt = timezone.make_aware(datetime(year, mon + 1, 1, 0, 0, 0), tz)
+                qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
+            except Exception:
+                pass
+
+        if start and end:
+            try:
+                start_dt = timezone.make_aware(datetime.fromisoformat(start), tz) if "Z" not in start else datetime.fromisoformat(start.replace("Z","+00:00"))
+                end_dt = timezone.make_aware(datetime.fromisoformat(end), tz) if "Z" not in end else datetime.fromisoformat(end.replace("Z","+00:00"))
+                qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
+            except Exception:
+                pass
+
+        if pocket:
+            qs = qs.filter(pocket_type=pocket)
+
+        return qs.order_by("-date", "-id")
