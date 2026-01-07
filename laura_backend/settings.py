@@ -185,3 +185,6 @@ OTP_LEN = int(os.getenv("OTP_LEN", "6"))
 OTP_EXP_MINUTES = int(os.getenv("OTP_EXP_MINUTES", "10"))
 SHOW_DEV_HINTS = (os.getenv("SHOW_DEV_HINTS", "1") == "1") and DEBUG
 
+if DEBUG:
+    # En dev: solo imprime el correo en consola
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"

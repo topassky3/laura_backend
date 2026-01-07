@@ -80,6 +80,7 @@ def verify(email: str, code: str) -> bool:
         otp.save(update_fields=["used"])
         return True
 
+# auth_otp/otp_service.py
 def _send_email(to_email: str, code: str) -> None:
     subject = "Tu código de acceso (expira en 10 minutos)"
     text = f"Tu código es {code}. Expira en 10 minutos. Si no fuiste tú, ignora este correo."
@@ -88,6 +89,17 @@ def _send_email(to_email: str, code: str) -> None:
     <p>Expira en <strong>10 minutos</strong>.</p>
     <p>Si no fuiste tú, puedes ignorar este mensaje.</p>"""
 
-    msg = EmailMultiAlternatives(subject, text, settings.DEFAULT_FROM_EMAIL, [to_email])
-    msg.attach_alternative(html, "text/html")
-    msg.send(fail_silently=False)
+    try:
+        msg = EmailMultiAlternatives(
+            subject,
+            text,
+            settings.DEFAULT_FROM_EMAIL,
+            [to_email],
+        )
+        msg.attach_alternative(html, "text/html")
+        msg.send(fail_silently=False)
+    except Exception as e:
+        # 🔍 Durante desarrollo NO queremos que explote todo
+        if settings.DEBUG:
+            print("⚠️ Error enviando email OTP:", repr(e))
+
