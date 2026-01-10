@@ -1,3 +1,4 @@
+# finance/views.py
 from datetime import datetime
 
 from django.db import transaction
@@ -6,6 +7,7 @@ from django.db.models import Sum
 
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from .models import Category, MoneyTx
@@ -94,19 +96,16 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
     serializer_class = MoneyTxSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        user = self.request.user
-        qs = MoneyTx.objects.filter(user=user)
-
+    def _apply_time_filters(self, qs):
+        """
+        Aplica filtros de tiempo si vienen en query params:
+        - month=YYYY-MM
+        - start/end en ISO (incluye soporte "Z")
+        Si no vienen, NO filtra (lifetime).
+        """
         month = self.request.query_params.get("month")
         start = self.request.query_params.get("start")
         end = self.request.query_params.get("end")
-
-        pocket = (
-            self.request.query_params.get("pocket_type")
-            or self.request.query_params.get("pocket")
-        )
-
         tz = timezone.get_current_timezone()
 
         if month:
@@ -114,15 +113,12 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
                 year, mon = [int(x) for x in month.split("-")]
                 start_dt = timezone.make_aware(datetime(year, mon, 1, 0, 0, 0), tz)
                 if mon == 12:
-                    end_dt = timezone.make_aware(
-                        datetime(year + 1, 1, 1, 0, 0, 0), tz
-                    )
+                    end_dt = timezone.make_aware(datetime(year + 1, 1, 1, 0, 0, 0), tz)
                 else:
-                    end_dt = timezone.make_aware(
-                        datetime(year, mon + 1, 1, 0, 0, 0), tz
-                    )
+                    end_dt = timezone.make_aware(datetime(year, mon + 1, 1, 0, 0, 0), tz)
                 qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
             except Exception:
+                # Silencioso por UX: si mandan month mal formado, no filtramos
                 pass
 
         if start and end:
@@ -130,25 +126,34 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
                 if "Z" in start:
                     start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
                 else:
-                    start_dt = timezone.make_aware(
-                        datetime.fromisoformat(start), tz
-                    )
+                    start_dt = timezone.make_aware(datetime.fromisoformat(start), tz)
 
                 if "Z" in end:
                     end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
                 else:
-                    end_dt = timezone.make_aware(
-                        datetime.fromisoformat(end), tz
-                    )
+                    end_dt = timezone.make_aware(datetime.fromisoformat(end), tz)
 
                 qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
             except Exception:
+                # Silencioso: si vienen fechas mal, no filtramos
                 pass
 
+        return qs
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = MoneyTx.objects.filter(user=user)
+
+        qs = self._apply_time_filters(qs)
+
+        pocket = (
+            self.request.query_params.get("pocket_type")
+            or self.request.query_params.get("pocket")
+        )
         if pocket:
             qs = qs.filter(pocket_type=pocket)
 
-        # 👇 NUEVO: filtro por nombre de categoría
+        # 👇 filtro por nombre de categoría
         category_name = (
             self.request.query_params.get("category_name")
             or self.request.query_params.get("category")
@@ -157,3 +162,36 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
             qs = qs.filter(category_name=category_name)
 
         return qs.order_by("-date", "-id")
+
+    @action(detail=False, methods=["get"], url_path="category-totals")
+    def category_totals(self, request):
+        """
+        Totales por categoría.
+
+        - Requiere: pocket_type (o pocket)
+        - Opcional: month=YYYY-MM o start/end
+        - Si NO mandas month/start/end => LIFETIME (todo el tiempo)
+        """
+        pocket_type = (
+            request.query_params.get("pocket_type")
+            or request.query_params.get("pocket")
+        )
+        if not pocket_type:
+            raise ValidationError({"pocket_type": "Este parámetro es requerido."})
+
+        qs = MoneyTx.objects.filter(user=request.user, pocket_type=pocket_type)
+        qs = self._apply_time_filters(qs)
+
+        # Opcional: por moneda (si lo necesitas)
+        currency = request.query_params.get("currency")
+        if currency:
+            qs = qs.filter(currency=(currency or "").upper().strip())
+
+        rows = (
+            qs.order_by()  # 🔥 importante: limpia ordering antes de agrupar
+            .values("category_name", "pocket_type")
+            .annotate(total_amount=Sum("amount"))
+            .order_by("-total_amount", "category_name")
+        )
+
+        return Response(list(rows))
