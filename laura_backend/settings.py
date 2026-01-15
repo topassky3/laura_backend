@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "auth_otp",
     "finance",
+    "banking",
 ]
 
 MIDDLEWARE = [
