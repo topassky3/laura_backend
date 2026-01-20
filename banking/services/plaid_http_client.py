@@ -101,6 +101,7 @@ class PlaidHttpClient:
         self.cfg = cfg
 
     def _headers(self) -> Dict[str, str]:
+        # Ok enviar también en headers; igualmente mandamos en body por compatibilidad.
         return {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -162,3 +163,38 @@ class PlaidHttpClient:
 
     def exchange_public_token(self, *, public_token: str) -> Dict[str, Any]:
         return self._post("/item/public_token/exchange", {"public_token": public_token})
+
+    # ✅ NUEVO: sync transacciones incremental
+    def transactions_sync(
+        self,
+        *,
+        access_token: str,
+        cursor: str | None = None,
+        count: int = 500,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "access_token": access_token,
+            "count": count,
+        }
+        if cursor:
+            payload["cursor"] = cursor
+        return self._post("/transactions/sync", payload)
+
+    # ✅ NUEVO: revocar acceso Plaid al desconectar
+    def item_remove(self, *, access_token: str) -> Dict[str, Any]:
+        return self._post("/item/remove", {"access_token": access_token})
+
+    # ✅ SANDBOX ONLY: crear transacciones de prueba
+    def sandbox_transactions_create(
+            self,
+            *,
+            access_token: str,
+            transactions: list[dict],
+    ) -> Dict[str, Any]:
+        return self._post(
+            "/sandbox/transactions/create",
+            {
+                "access_token": access_token,
+                "transactions": transactions,
+            },
+        )

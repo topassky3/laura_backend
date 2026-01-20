@@ -1,15 +1,24 @@
-# banking/views.py
+from __future__ import annotations
+
 from typing import Any, Dict
 
 from django.db import transaction
+from django.db.models import Q
 from django.db.utils import OperationalError, ProgrammingError
+from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import PlaidAccount, PlaidItem
-from .serializers import ExchangePublicTokenSerializer, CreateLinkTokenSerializer
+from .models import BankAlert, PlaidAccount, PlaidItem
+from .serializers import (
+    AckAlertsSerializer,
+    BankAlertSerializer,
+    CreateLinkTokenSerializer,
+    ExchangePublicTokenSerializer,
+)
 from .services.plaid_http_client import PlaidApiError, PlaidHttpClient, load_plaid_config
+from .services.plaid_sync import sync_transactions_for_user
 
 
 def _ok(data: Dict[str, Any], status_code: int = 200) -> Response:
@@ -103,6 +112,7 @@ class PlaidExchangePublicTokenView(APIView):
                         access_token=access_token,
                         institution_id=inst_id,
                         institution_name=inst_name,
+                        tx_cursor="",
                     )
 
                 for a in accounts:
@@ -177,17 +187,29 @@ class PlaidStatusView(APIView):
 class PlaidDisconnectView(APIView):
     """
     Desconecta el banco del usuario:
-    - Borra PlaidItem(s) del usuario (y por cascade borra PlaidAccount).
-    - Resultado: /status/ vuelve a connected=false.
+    - Revoca access_token en Plaid (item/remove)
+    - Borra PlaidItem(s) del usuario (y por cascade borra cuentas/transacciones/alertas).
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
+            cfg = load_plaid_config()
+            client = PlaidHttpClient(cfg)
+
             with transaction.atomic():
-                qs = PlaidItem.objects.filter(user=request.user)
-                removed = qs.count()
-                qs.delete()
+                items = list(PlaidItem.objects.filter(user=request.user))
+                removed = len(items)
+
+                # Revocar en Plaid (si falla, igual borramos local para que el usuario "se desconecte")
+                for it in items:
+                    try:
+                        client.item_remove(access_token=it.access_token)
+                    except Exception:
+                        # Silencioso: no bloquea desconexión local
+                        pass
+
+                PlaidItem.objects.filter(user=request.user).delete()
 
             return _ok({"status": "ok", "removed_items": removed})
 
@@ -203,3 +225,68 @@ class PlaidDisconnectView(APIView):
             )
         except Exception as e:
             return _err(f"Error interno desconectando banco: {e}", status_code=500)
+
+
+# ✅ NUEVO: Forzar sync desde la app (para detectar ingresos "en vivo" mientras está abierta)
+class PlaidSyncNowView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            summary = sync_transactions_for_user(request.user)
+            return _ok({"status": "ok", **summary})
+        except PlaidApiError as e:
+            return _err(str(e), status_code=e.status_code, details=getattr(e, "details", None))
+        except (ProgrammingError, OperationalError) as e:
+            return _err(
+                "Base de datos sin migraciones del app 'banking'. "
+                "Crea/aplica migraciones y vuelve a intentar.",
+                status_code=500,
+                details={
+                    "hint": "Ejecuta: python manage.py makemigrations banking && python manage.py migrate",
+                    "db_error": str(e),
+                },
+            )
+        except Exception as e:
+            return _err(f"Error interno sincronizando transacciones: {e}", status_code=500)
+
+
+# ✅ NUEVO: listar alertas no vistas
+class BankAlertsUnreadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            qs = (
+                BankAlert.objects
+                .select_related("item")
+                .filter(user=request.user)
+                .filter(seen_at__isnull=True)
+                .order_by("-created_at")[:25]
+            )
+            return _ok({"alerts": BankAlertSerializer(qs, many=True).data})
+        except Exception as e:
+            return _err(f"Error leyendo alertas: {e}", status_code=500)
+
+
+# ✅ NUEVO: ack (marcar como vistas)
+class BankAlertsAckView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = AckAlertsSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ids = ser.validated_data["ids"]
+
+        try:
+            now = timezone.now()
+            updated = (
+                BankAlert.objects
+                .filter(user=request.user)
+                .filter(id__in=ids)
+                .filter(seen_at__isnull=True)
+                .update(seen_at=now)
+            )
+            return _ok({"status": "ok", "acked": updated})
+        except Exception as e:
+            return _err(f"Error confirmando alertas: {e}", status_code=500)
