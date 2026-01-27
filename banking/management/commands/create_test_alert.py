@@ -1,4 +1,3 @@
-# banking/management/commands/create_test_alert.py
 from __future__ import annotations
 
 from decimal import Decimal
@@ -9,15 +8,25 @@ from banking.models import BankAlert, PlaidItem
 
 
 class Command(BaseCommand):
-    help = "Crea una BankAlert de prueba (sin depender de Plaid) para testear el banner en la app."
+    help = "Crea una BankAlert de prueba (sin depender de Plaid) para testear banner/notificaciones."
 
     def add_arguments(self, parser):
         parser.add_argument("--user-id", type=int, default=0, help="ID del usuario")
         parser.add_argument("--email", type=str, default="", help="Email del usuario")
+
+        parser.add_argument(
+            "--kind",
+            type=str,
+            default="income",
+            help="Tipo de alerta: income | expense",
+        )
+
         parser.add_argument("--amount", type=str, default="1200.00", help="Monto (ej 1200.00)")
         parser.add_argument("--currency", type=str, default="USD", help="Moneda (ej USD)")
-        parser.add_argument("--title", type=str, default="Ingreso detectado 💰 (TEST)")
-        parser.add_argument("--message", type=str, default="Nómina (manual test)")
+
+        # ✅ Ahora default dinámico según kind:
+        parser.add_argument("--title", type=str, default="", help="Título (opcional)")
+        parser.add_argument("--message", type=str, default="", help="Mensaje (opcional)")
 
     def handle(self, *args, **opts):
         user_id = int(opts["user_id"] or 0)
@@ -44,19 +53,32 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR("Ese usuario no tiene PlaidItem. Conecta un banco primero."))
             return
 
+        kind = (opts["kind"] or "income").strip().lower()
+        if kind not in {BankAlert.KIND_INCOME, BankAlert.KIND_EXPENSE}:
+            self.stdout.write(self.style.ERROR("kind inválido. Usa: income | expense"))
+            return
+
         amount = Decimal(str(opts["amount"] or "0")).copy_abs()
         currency = (opts["currency"] or "USD").strip().upper()
-        title = (opts["title"] or "").strip() or "Ingreso detectado 💰 (TEST)"
-        message = (opts["message"] or "").strip() or "Nómina (manual test)"
+
+        title = (opts["title"] or "").strip()
+        message = (opts["message"] or "").strip()
+
+        if not title:
+            title = "Ingreso detectado 💰 (TEST)" if kind == BankAlert.KIND_INCOME else "Gasto detectado 💸 (TEST)"
+        if not message:
+            message = "Nómina (manual test)" if kind == BankAlert.KIND_INCOME else "Compra (manual test)"
 
         a = BankAlert.objects.create(
             user=u,
             item=item,
-            kind=BankAlert.KIND_INCOME,
+            kind=kind,
             title=title,
             message=message,
             amount=amount,
             currency=currency,
         )
 
-        self.stdout.write(self.style.SUCCESS(f"✅ BankAlert creada: id={a.id} user_id={u.id} item_id={item.item_id}"))
+        self.stdout.write(self.style.SUCCESS(
+            f"✅ BankAlert creada: id={a.id} kind={a.kind} user_id={u.id} item_id={item.item_id}"
+        ))

@@ -1,4 +1,3 @@
-# banking/services/plaid_sync.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,19 +28,38 @@ def _parse_date(s: Any) -> date | None:
         return None
 
 
-def _is_income(tx: Dict[str, Any]) -> bool:
+def _tx_direction(raw_tx: Dict[str, Any]) -> str:
+    return (raw_tx.get("transaction_type") or raw_tx.get("direction") or "").strip().upper()
+
+
+def _is_income(raw_tx: Dict[str, Any]) -> bool:
     """
     Regla robusta:
     - Si viene transaction_type/direction = CREDIT => ingreso
     - Si no, amount < 0 => ingreso (en Plaid, CREDIT suele venir negativo)
     """
-    ttype = (tx.get("transaction_type") or tx.get("direction") or "").strip().upper()
-    amt = _dec(tx.get("amount", 0))
+    ttype = _tx_direction(raw_tx)
+    amt = _dec(raw_tx.get("amount", 0))
     if ttype == "CREDIT":
         return True
     if ttype == "DEBIT":
         return False
     return amt < 0
+
+
+def _is_expense(raw_tx: Dict[str, Any]) -> bool:
+    """
+    Regla robusta:
+    - Si viene transaction_type/direction = DEBIT => gasto
+    - Si no, amount > 0 => gasto (en Plaid, DEBIT suele venir positivo)
+    """
+    ttype = _tx_direction(raw_tx)
+    amt = _dec(raw_tx.get("amount", 0))
+    if ttype == "DEBIT":
+        return True
+    if ttype == "CREDIT":
+        return False
+    return amt > 0
 
 
 @dataclass
@@ -50,7 +68,16 @@ class SyncResult:
     modified: int = 0
     removed: int = 0
     new_income_alerts: int = 0
+    new_expense_alerts: int = 0
     next_cursor: str = ""
+
+
+def _tx_label(tx_obj: PlaidTransaction) -> str:
+    return (tx_obj.merchant_name or tx_obj.name or "").strip() or "Movimiento"
+
+
+def _tx_currency(tx_obj: PlaidTransaction) -> str:
+    return (tx_obj.iso_currency_code or tx_obj.unofficial_currency_code or "").strip()
 
 
 def _maybe_create_income_alert(*, item: PlaidItem, tx_obj: PlaidTransaction, raw_tx: Dict[str, Any]) -> bool:
@@ -81,9 +108,42 @@ def _maybe_create_income_alert(*, item: PlaidItem, tx_obj: PlaidTransaction, raw
         transaction=tx_obj,
         kind=BankAlert.KIND_INCOME,
         title="Ingreso detectado 💰",
-        message=(tx_obj.merchant_name or tx_obj.name or "Ingreso").strip(),
+        message=_tx_label(tx_obj),
         amount=abs_amount,
-        currency=(tx_obj.iso_currency_code or tx_obj.unofficial_currency_code or "").strip(),
+        currency=_tx_currency(tx_obj),
+    )
+    return True
+
+
+def _maybe_create_expense_alert(*, item: PlaidItem, tx_obj: PlaidTransaction, raw_tx: Dict[str, Any]) -> bool:
+    """
+    Crea una alerta de gasto si corresponde y si aún no existe.
+    Retorna True si creó una alerta.
+    """
+    amount = _dec(raw_tx.get("amount", 0))
+    pending = bool(raw_tx.get("pending", False))
+
+    if pending:
+        return False
+    if amount == 0:
+        return False
+    if not _is_expense(raw_tx):
+        return False
+
+    abs_amount = abs(amount)
+
+    if BankAlert.objects.filter(transaction=tx_obj).exists():
+        return False
+
+    BankAlert.objects.create(
+        user=item.user,
+        item=item,
+        transaction=tx_obj,
+        kind=BankAlert.KIND_EXPENSE,
+        title="Gasto detectado 💸",
+        message=_tx_label(tx_obj),
+        amount=abs_amount,
+        currency=_tx_currency(tx_obj),
     )
     return True
 
@@ -97,6 +157,14 @@ def _upsert_transactions(
 ) -> SyncResult:
     res = SyncResult()
 
+    def _maybe_alert(obj: PlaidTransaction, tx: Dict[str, Any]) -> None:
+        # Solo una alerta por transacción (income XOR expense)
+        if _maybe_create_income_alert(item=item, tx_obj=obj, raw_tx=tx):
+            res.new_income_alerts += 1
+            return
+        if _maybe_create_expense_alert(item=item, tx_obj=obj, raw_tx=tx):
+            res.new_expense_alerts += 1
+
     # ADDED
     for tx in added:
         txid = (tx.get("transaction_id") or "").strip()
@@ -106,7 +174,7 @@ def _upsert_transactions(
         amount = _dec(tx.get("amount", 0))
         pending = bool(tx.get("pending", False))
 
-        obj, created = PlaidTransaction.objects.update_or_create(
+        obj, _created = PlaidTransaction.objects.update_or_create(
             transaction_id=txid,
             defaults={
                 "item": item,
@@ -124,11 +192,8 @@ def _upsert_transactions(
             },
         )
 
-        # "added" de Plaid = nueva para el cursor, aunque en DB ya exista por algún motivo
         res.added += 1
-
-        if _maybe_create_income_alert(item=item, tx_obj=obj, raw_tx=tx):
-            res.new_income_alerts += 1
+        _maybe_alert(obj, tx)
 
     # MODIFIED
     for tx in modified:
@@ -161,8 +226,7 @@ def _upsert_transactions(
         res.modified += 1
 
         # ✅ CLAVE: si antes estaba pending y ahora ya no, aquí se crea la alerta.
-        if _maybe_create_income_alert(item=item, tx_obj=obj, raw_tx=tx):
-            res.new_income_alerts += 1
+        _maybe_alert(obj, tx)
 
     # REMOVED
     for tx in removed:
@@ -179,7 +243,7 @@ def _upsert_transactions(
 def sync_transactions_for_item(item: PlaidItem) -> SyncResult:
     """
     Ejecuta /transactions/sync hasta has_more=false, guarda cursor,
-    y crea alertas por ingresos nuevos.
+    y crea alertas por ingresos/gastos nuevos.
     """
     cfg = load_plaid_config()
     client = PlaidHttpClient(cfg)
@@ -203,6 +267,7 @@ def sync_transactions_for_item(item: PlaidItem) -> SyncResult:
             out.modified += chunk.modified
             out.removed += chunk.removed
             out.new_income_alerts += chunk.new_income_alerts
+            out.new_expense_alerts += chunk.new_expense_alerts
 
             if next_cursor:
                 item.tx_cursor = next_cursor
@@ -224,14 +289,16 @@ def sync_transactions_for_user(user) -> Dict[str, Any]:
     Retorna un resumen para la API.
     """
     items = list(PlaidItem.objects.filter(user=user))
-    total_alerts = 0
+    total_income_alerts = 0
+    total_expense_alerts = 0
     total_added = 0
     total_modified = 0
     total_removed = 0
 
     for item in items:
         r = sync_transactions_for_item(item)
-        total_alerts += r.new_income_alerts
+        total_income_alerts += r.new_income_alerts
+        total_expense_alerts += r.new_expense_alerts
         total_added += r.added
         total_modified += r.modified
         total_removed += r.removed
@@ -241,5 +308,6 @@ def sync_transactions_for_user(user) -> Dict[str, Any]:
         "added": total_added,
         "modified": total_modified,
         "removed": total_removed,
-        "new_income_alerts": total_alerts,
+        "new_income_alerts": total_income_alerts,
+        "new_expense_alerts": total_expense_alerts,
     }

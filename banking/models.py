@@ -69,7 +69,7 @@ class PlaidTransaction(models.Model):
     name = models.CharField(max_length=512, blank=True, default="")
     merchant_name = models.CharField(max_length=255, blank=True, default="")
 
-    # ⚠️ Plaid: CREDIT suele venir negativo, DEBIT positivo (según docs de Plaid) :contentReference[oaicite:1]{index=1}
+    # ⚠️ Plaid: CREDIT suele venir negativo, DEBIT positivo (según docs de Plaid)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
 
     iso_currency_code = models.CharField(max_length=8, blank=True, default="")
@@ -100,12 +100,14 @@ class PlaidTransaction(models.Model):
 
 class BankAlert(models.Model):
     """
-    Alertas por ingresos detectados.
+    Alertas por movimientos bancarios detectados (ingresos/gastos).
     Se consumen por la app móvil y se marcan como 'seen' cuando el cliente hace ACK.
     """
     KIND_INCOME = "income"
+    KIND_EXPENSE = "expense"
     KIND_CHOICES = [
         (KIND_INCOME, "Income"),
+        (KIND_EXPENSE, "Expense"),
     ]
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bank_alerts")

@@ -9,20 +9,20 @@ from banking.services.plaid_sync import sync_transactions_for_item
 
 
 class Command(BaseCommand):
-    help = "Crea un 'ingreso' de prueba en Plaid Sandbox y fuerza sync para generar BankAlert."
+    help = "Crea un 'gasto' de prueba en Plaid Sandbox y fuerza sync para generar BankAlert(kind=expense)."
 
     def add_arguments(self, parser):
         parser.add_argument(
             "--amount",
             type=float,
-            default=1200.0,
-            help="Monto absoluto. Para ingreso se enviará negativo (default: 1200.0).",
+            default=35.0,
+            help="Monto absoluto. Para gasto se enviará positivo (default: 35.0).",
         )
         parser.add_argument(
             "--description",
             type=str,
-            default="Nómina (Sandbox)",
-            help="Descripción de la transacción (default: 'Nómina (Sandbox)')",
+            default="Compra (Sandbox)",
+            help="Descripción de la transacción (default: 'Compra (Sandbox)')",
         )
         parser.add_argument(
             "--currency",
@@ -45,7 +45,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         amount_abs = float(opts["amount"])
-        description = (opts["description"] or "").strip() or "Nómina (Sandbox)"
+        description = (opts["description"] or "").strip() or "Compra (Sandbox)"
         currency = (opts["currency"] or "USD").strip().upper() or "USD"
         item_id = (opts["item_id"] or "").strip()
         user_id = int(opts["user_id"] or 0)
@@ -63,9 +63,9 @@ class Command(BaseCommand):
 
         today = timezone.localdate().isoformat()
 
-        # Ingreso = negativo (según tu regla)
+        # Gasto = positivo
         payload = {
-            "amount": -abs(amount_abs),
+            "amount": abs(amount_abs),
             "date_posted": today,
             "date_transacted": today,
             "description": description,
@@ -87,7 +87,6 @@ class Command(BaseCommand):
                 self.stdout.write(str(e.details))
             return
 
-        # Forzar sync para que llegue a DB y cree BankAlert
         sync_res = sync_transactions_for_item(item)
 
         unseen = BankAlert.objects.filter(user=item.user, seen_at__isnull=True).order_by("-created_at")[:10]
@@ -98,10 +97,10 @@ class Command(BaseCommand):
             )
         )
 
-        if sync_res.new_income_alerts == 0:
+        if sync_res.new_expense_alerts == 0:
             self.stdout.write(
                 self.style.ERROR(
-                    "No se generaron alertas de ingreso. OJO: /sandbox/transactions/create SOLO funciona si "
+                    "No se generaron alertas de gasto. OJO: /sandbox/transactions/create SOLO funciona si "
                     "el Item fue creado con el usuario sandbox 'user_transactions_dynamic'."
                 )
             )
