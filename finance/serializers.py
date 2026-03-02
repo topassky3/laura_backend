@@ -1,6 +1,6 @@
 # finance/serializers.py
 from rest_framework import serializers
-from .models import Category, POCKET_TYPES, MoneyTx
+from .models import Category, POCKET_TYPES, MoneyTx, FinancePreference
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -33,7 +33,6 @@ class CategorySerializer(serializers.ModelSerializer):
         return v
 
     def create(self, validated_data):
-        # El usuario siempre es el autenticado
         validated_data["user"] = self.context["request"].user
         return super().create(validated_data)
 
@@ -43,22 +42,16 @@ class MoneyTxSerializer(serializers.ModelSerializer):
     El front usa "category" como string -> mapeado a category_name.
     pocket_type es el bolsillo real ('ingreso', 'gasto', 'ahorro', 'inversion').
     """
-
     category = serializers.CharField(source="category_name")
-    pocket_type = serializers.ChoiceField(
-        choices=[k for (k, _) in POCKET_TYPES]
-    )
-    category_id = serializers.IntegerField(
-        source="category.id",
-        read_only=True,
-    )
+    pocket_type = serializers.ChoiceField(choices=[k for (k, _) in POCKET_TYPES])
+    category_id = serializers.IntegerField(source="category.id", read_only=True)
 
     class Meta:
         model = MoneyTx
         fields = [
             "id",
-            "pocket_type",  # bolsillo real
-            "type",         # solo visual (ingreso|gasto)
+            "pocket_type",
+            "type",
             "category",
             "category_id",
             "amount",
@@ -80,18 +73,12 @@ class MoneyTxSerializer(serializers.ModelSerializer):
     def validate_currency(self, v: str) -> str:
         v = (v or "").upper().strip()
         if len(v) != 3:
-            raise serializers.ValidationError(
-                "currency debe ser código ISO-4217 de 3 letras."
-            )
+            raise serializers.ValidationError("currency debe ser ISO-4217 (3 letras).")
         return v
 
     def _resolve_category(self, user, pocket_type: str, name: str):
         try:
-            return Category.objects.get(
-                user=user,
-                pocket_type=pocket_type,
-                name=name,
-            )
+            return Category.objects.get(user=user, pocket_type=pocket_type, name=name)
         except Category.DoesNotExist:
             return None
 
@@ -103,13 +90,10 @@ class MoneyTxSerializer(serializers.ModelSerializer):
         pocket = validated_data.get("pocket_type")
 
         if name and pocket:
-            validated_data["category"] = self._resolve_category(
-                user, pocket, name
-            )
+            validated_data["category"] = self._resolve_category(user, pocket, name)
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # user nunca cambia
         validated_data.pop("user", None)
         user = self.context["request"].user
 
@@ -117,8 +101,31 @@ class MoneyTxSerializer(serializers.ModelSerializer):
         name = validated_data.get("category_name", instance.category_name)
 
         if pocket and name:
-            validated_data["category"] = self._resolve_category(
-                user, pocket, name
-            )
+            validated_data["category"] = self._resolve_category(user, pocket, name)
 
         return super().update(instance, validated_data)
+
+
+# ✅ NUEVO
+class FinancePreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FinancePreference
+        fields = [
+            "display_currency",
+            "usd_cop_rate",
+            "updated_at",
+        ]
+
+    def validate_display_currency(self, v: str) -> str:
+        v = (v or "").upper().strip()
+        if v not in ("COP", "USD"):
+            raise serializers.ValidationError("display_currency inválida (COP|USD).")
+        return v
+
+    def validate_usd_cop_rate(self, v):
+        # DecimalField ya valida, pero reforzamos:
+        if v is None:
+            return v
+        if v <= 0:
+            raise serializers.ValidationError("usd_cop_rate debe ser > 0.")
+        return v

@@ -9,9 +9,10 @@ from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import Category, MoneyTx
-from .serializers import CategorySerializer, MoneyTxSerializer
+from .models import Category, MoneyTx, FinancePreference
+from .serializers import CategorySerializer, MoneyTxSerializer, FinancePreferenceSerializer
 
 DEFAULTS = {
     "ingreso": [
@@ -72,6 +73,31 @@ def ensure_defaults(user, pocket_type: str | None = None):
     return created
 
 
+def get_or_create_prefs(user) -> FinancePreference:
+    prefs, _ = FinancePreference.objects.get_or_create(user=user)
+    return prefs
+
+
+class FinancePreferencesView(APIView):
+    """
+    ✅ Preferencias UI de moneda (persistidas por usuario)
+    GET  /api/fin/preferences/
+    PATCH /api/fin/preferences/  { display_currency: "COP"|"USD", usd_cop_rate?: 4000.0 }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        prefs = get_or_create_prefs(request.user)
+        return Response(FinancePreferenceSerializer(prefs).data)
+
+    def patch(self, request):
+        prefs = get_or_create_prefs(request.user)
+        ser = FinancePreferenceSerializer(prefs, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
+
+
 class CategoryViewSet(viewsets.ModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -87,7 +113,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
         return qs
 
     def list(self, request, *args, **kwargs):
-        ptype = request.query_params.get("pocket_type")
+        ptype = self.request.query_params.get("pocket_type")
         ensure_defaults(request.user, pocket_type=ptype)
         return super().list(request, *args, **kwargs)
 
@@ -118,7 +144,6 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
                     end_dt = timezone.make_aware(datetime(year, mon + 1, 1, 0, 0, 0), tz)
                 qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
             except Exception:
-                # Silencioso por UX: si mandan month mal formado, no filtramos
                 pass
 
         if start and end:
@@ -135,7 +160,6 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
 
                 qs = qs.filter(date__gte=start_dt, date__lt=end_dt)
             except Exception:
-                # Silencioso: si vienen fechas mal, no filtramos
                 pass
 
         return qs
@@ -143,21 +167,13 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = MoneyTx.objects.filter(user=user)
-
         qs = self._apply_time_filters(qs)
 
-        pocket = (
-            self.request.query_params.get("pocket_type")
-            or self.request.query_params.get("pocket")
-        )
+        pocket = self.request.query_params.get("pocket_type") or self.request.query_params.get("pocket")
         if pocket:
             qs = qs.filter(pocket_type=pocket)
 
-        # 👇 filtro por nombre de categoría
-        category_name = (
-            self.request.query_params.get("category_name")
-            or self.request.query_params.get("category")
-        )
+        category_name = self.request.query_params.get("category_name") or self.request.query_params.get("category")
         if category_name:
             qs = qs.filter(category_name=category_name)
 
@@ -166,30 +182,27 @@ class MoneyTxViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="category-totals")
     def category_totals(self, request):
         """
-        Totales por categoría.
+        ✅ Totales por categoría (AHORA SEPARADOS POR MONEDA)
 
         - Requiere: pocket_type (o pocket)
         - Opcional: month=YYYY-MM o start/end
-        - Si NO mandas month/start/end => LIFETIME (todo el tiempo)
+        - Si NO mandas month/start/end => LIFETIME
         """
-        pocket_type = (
-            request.query_params.get("pocket_type")
-            or request.query_params.get("pocket")
-        )
+        pocket_type = request.query_params.get("pocket_type") or request.query_params.get("pocket")
         if not pocket_type:
             raise ValidationError({"pocket_type": "Este parámetro es requerido."})
 
         qs = MoneyTx.objects.filter(user=request.user, pocket_type=pocket_type)
         qs = self._apply_time_filters(qs)
 
-        # Opcional: por moneda (si lo necesitas)
+        # (Opcional) filtrar por moneda si lo pides:
         currency = request.query_params.get("currency")
         if currency:
             qs = qs.filter(currency=(currency or "").upper().strip())
 
         rows = (
-            qs.order_by()  # 🔥 importante: limpia ordering antes de agrupar
-            .values("category_name", "pocket_type")
+            qs.order_by()
+            .values("category_name", "pocket_type", "currency")  # ✅ include currency
             .annotate(total_amount=Sum("amount"))
             .order_by("-total_amount", "category_name")
         )

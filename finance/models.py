@@ -1,4 +1,6 @@
 # finance/models.py
+from decimal import Decimal
+
 from django.db import models
 from django.contrib.auth import get_user_model
 
@@ -100,3 +102,38 @@ class MoneyTx(models.Model):
     def pocket_sign(self) -> int:
         # Para flujo de caja neto: ingreso = +, resto = -
         return 1 if self.pocket_type == "ingreso" else -1
+
+
+# ✅ NUEVO: Preferencias financieras por usuario (moneda UI + tasa USD/COP)
+class FinancePreference(models.Model):
+    DISPLAY_CHOICES = (
+        ("COP", "COP"),
+        ("USD", "USD"),
+    )
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="finance_prefs",
+    )
+
+    # Moneda seleccionada en la UI (toggle)
+    display_currency = models.CharField(
+        max_length=3,
+        choices=DISPLAY_CHOICES,
+        default="COP",
+    )
+
+    # Tasa usada para conversión (USD -> COP).
+    # Puedes actualizarla con PATCH si quieres (o fijarla desde admin).
+    usd_cop_rate = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("4000.0000"),
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"{self.user_id} · {self.display_currency} · {self.usd_cop_rate}"
